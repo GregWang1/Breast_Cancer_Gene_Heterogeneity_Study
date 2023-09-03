@@ -1,0 +1,183 @@
+				
+	
+
+
+
+# Breast Cancer Gene Heterogeneity Case Study by NGS(next generation sequence)
+
+
+#                  By Jianxun Wang 08/2023
+
+
+#In this case study, NGS data was downloaded from NCBI ,with ID at SRR13268273 . 
+#The sample was a breast cancer tissue from a patient with invasive ductal carcinoma.
+
+	
+############################## start on 08-04-2023
+
+fasterq-dump -p --split-files  SRR13268273  # IDC
+        
+
+bgzip  SRR13268273_1.fastq
+bgzip  SRR13268273_2.fastq
+
+fastqc SRR13268273_1.fastq.gz  # could write like all uinsg * cover all fastq.gz file and move all resulst in one empty folder
+fastqc  SRR13268273_2.fastq.gz
+
+
+fastp    -i raw_data/SRR13268273_1.fastq.gz  -I raw_data/SRR13268273_2.fastq.gz \
+           -o Trimmed/SRR13268273_1.trimmed.fastq.gz  -O  Trimmed/SRR13268273_2.trimmed.fastq.gz \
+		   --html Trimmed/SRR13268273.fastp.html \
+	       --json Trimmed/SRR13268273.fastp.json \
+		   --detect_adapter_for_pe \
+		   -p \
+		   --correction 
+		
+		   
+fastqc  Trimmed/SRR13268273_1.trimmed.fastq.gz
+fastqc  Trimmed/SRR13268273_2.trimmed.fastq.gz
+		
+multiqc raw_data  Trimmed
+
+bwa  index  genome_reference/Homo_sapiens.GRCh38.dna.primary_assembly.fa
+
+bwa mem -t 2 -M  genome_reference/Homo_sapiens.GRCh38.dna.primary_assembly.fa  \
+               data_BreastCancer/Trimmed/SRR13268273_1.trimmed.fastq.gz    data_BreastCancer/Trimmed/SRR13268273_2.trimmed.fastq.gz  \
+               > data_BreastCancer/mapping/SRR13268273.sam
+	
+
+samtools sort -n -O sam data_BreastCancer/mapping/SRR13268273.sam | samtools fixmate -m -O bam - data_BreastCancer/mapping/SRR13268273.fixmate.bam
+
+samtools sort -o data_BreastCancer/mapping/SRR13268273.sorted.bam   data_BreastCancer/mapping/SRR13268273.fixmate.bam
+
+# marking duplicates
+java -Xmx4g -jar /home/gregwang/software/gatk-4.2.6.1/gatk-package-4.2.6.1-local.jar\
+         MarkDuplicates \
+        -I data_BreastCancer/mapping/SRR13268273.sorted.bam \
+		-O data_BreastCancer/mapping/SRR13268273.sorted.RD.bam \
+		-M SRR13268273.sorted.RD_metrics.txt
+
+
+# adding a read group
+java -Xmx4g -jar /home/gregwang/software/gatk-4.2.6.1/gatk-package-4.2.6.1-local.jar \
+             AddOrReplaceReadGroups \
+			 -I  data_BreastCancer/mapping/SRR13268273.sorted.RD.bam \
+			-O  data_BreastCancer/mapping/SRR13268273.sorted.RD.RG.bam \
+			-PL ILLUMINA  -PU run -LB  13268273  -SM  SRR13268273
+			
+tabix -p vcf genome_reference/1000GENOMES-phase_3.vcf.gz
+
+
+## first time calibrating
+java -Xmx4g -jar /home/gregwang/software/gatk-4.2.6.1/gatk-package-4.2.6.1-local.jar \
+             BaseRecalibrator \
+			 -R genome_reference/Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz  \
+			 --known-sites genome_reference/1000GENOMES-phase_3.vcf.gz\
+			 -I data_BreastCancer/mapping/SRR13268273.sorted.RD.RG.bam \
+			 -O data_BreastCancer/mapping/SRR13268273_cov1.txt 
+
+# adding calibrated informationn
+java -Xmx4g -jar /home/gregwang/software/gatk-4.2.6.1/gatk-package-4.2.6.1-local.jar \
+              ApplyBQSR  \
+			  -R genome_reference/Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz  \
+			  -bqsr data_BreastCancer/mapping/SRR13268273_cov1.txt  \
+			  -I data_BreastCancer/mapping/SRR13268273.sorted.RD.RG.bam \
+			  -O data_BreastCancer/mapping/SRR13268273.sorted.RD.RG.RC.bam
+
+# recalibrating
+java -Xmx4g -jar /home/gregwang/software/gatk-4.2.6.1/gatk-package-4.2.6.1-local.jar \
+             BaseRecalibrator \
+			 -R genome_reference/Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz  \
+			 --known-sites genome_reference/1000GENOMES-phase_3.vcf.gz\
+			 -I data_BreastCancer/mapping/SRR13268273.sorted.RD.RG.RC.bam \
+			 -O data_BreastCancer/mapping/SRR13268273_cov2.txt 
+
+
+# calibrating assay
+java -Xmx4g -jar /home/gregwang/software/gatk-4.2.6.1/gatk-package-4.2.6.1-local.jar \
+            AnalyzeCovariates \
+			-before  data_BreastCancer/mapping/SRR13268273_cov1.txt  \
+			-after data_BreastCancer/mapping/SRR13268273_cov2.txt  \
+			-plots data_BreastCancer/mapping/SRR13268273AnalyzeCovariates.pdf 
+
+    
+    
+# selection q20 for further calling ( q is mapping quality not base quality)
+samtools view -h -b -q 20  data_BreastCancer/mapping/SRR13268273.sorted.RD.RG.RC.bam  \
+                              > data_BreastCancer/mapping/SRR13268273.sorted.RD.RG.RC.q20.bam
+   
+samtools index data_BreastCancer/mapping/SRR13268273.sorted.RD.RG.RC.q20.bam
+
+qualimap bamqc -bam data_BreastCancer/mapping/SRR13268273.sorted.RD.RG.RC.q20.bam
+
+#   -p 1, let freebayes automatically determine the ploidy variant calling by freebayes
+freebayes  -p 1 -f genome_reference/Homo_sapiens.GRCh38.dna.primary_assembly.fa \
+                        data_BreastCancer/mapping/SRR13268273.sorted.RD.RG.RC.q20.bam \
+                         > data_BreastCancer/mapping/SRR13268273.freebayes.vcf
+
+cat  data_BreastCancer/mapping/SRR13268273.freebayes.vcf | head
+
+bgzip data_BreastCancer/mapping/SRR13268273.freebayes.vcf
+
+tabix -p vcf  data_BreastCancer/mapping/SRR13268273.freebayes.vcf.gz
+
+rtg vcfstats data_BreastCancer/mapping/SRR13268273.freebayes.vcf.gz
+
+bcftools stats -F genome_reference/Homo_sapiens.GRCh38.dna.primary_assembly.fa  \
+                      -s - data_BreastCancer/mapping/SRR13268273.freebayes.vcf.gz\
+                      > data_BreastCancer/mapping/SRR13268273.freebayes.vcf.gz.stats
+
+rtg vcffilter -q 30 -i data_BreastCancer/mapping/SRR13268273.freebayes.vcf.gz \
+                          -o data_BreastCancer/mapping/SRR13268273.freebayes.q30.vcf.gz
+						  
+rtg vcfstats data_BreastCancer/mapping/SRR13268273.freebayes.q30.vcf.gz
+
+
+# human database downloaded
+  java -jar snpEff.jar download GRCh38.105
+
+# variant call by snpEff case, 
+java  -Xmx4g -jar snpEff.jar  ann -nolog -no-downstream -no-upstream -no-utr \
+                              -c snpEff.config  GRCh38.105 \
+							  /home/gregwang/projects/data_BreastCancer/mapping/SRR13268273.freebayes.vcf \
+							  >  /home/gregwang/projects/data_BreastCancer/mapping/SRR13268273.freebayes.ann.vcf
+
+
+## list of genes with variants aggregated
+
+bcftools query -f '%CHROM\t%POS\t%INFO/ANN\n' /home/gregwang/projects/data_BreastCancer/mapping/SRR13268273.freebayes.ann3.vcf | \
+awk -F'\t' 'BEGIN{OFS="\t"} {
+    split($3, ann, "|");
+    gene = ann[4];
+    variant = ann[1];
+    chromosomes = $1;
+    position = $2;
+    
+    variants[gene] = variants[gene] "," chromosomes ":" position ":" variant;
+}
+END {
+    for (gene in variants) {
+        print gene, substr(variants[gene], 2);
+    }
+}' > /home/gregwang/projects/data_BreastCancer/mapping/gene_extracted.txt
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
